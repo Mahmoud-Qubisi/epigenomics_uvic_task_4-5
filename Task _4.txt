@@ -1,0 +1,171 @@
+
+#TASK-4 ATAC-seq downstream analysis
+
+#Objective
+#The goal of this analysis to calculate:
+#1. the number of ATAC-seq peaks that intersect promoter regions
+#2. the number of ATAC-seq peaks outside gene coordinates
+
+
+
+
+#Workflow 
+#####################################################################################
+
+#1. Repository setup
+
+
+#The repository was cloned from GitHub:
+git clone https://github.com/bborsari/epigenomics_uvic
+
+#Then the repository directory was entered:
+cd epigenomics_uvic
+
+#A Docker container was launched to run the analysis environment:
+docker run -v $PWD:$PWD -w $PWD --rm -it dgarrimar/epigenomics_course
+
+
+#####################################################################################
+#2. Move to the ATAC-seq folder
+
+#Inside the container, the ATAC-seq directory was entered:
+cd ATAC-seq
+
+#####################################################################################
+#3. Create the folder structure
+
+#The following folders were created to organize the analysis:
+mkdir data
+mkdir data/bigBed.files
+mkdir data/bed.files
+mkdir analyses
+mkdir analyses/peaks.analysis
+mkdir annotation
+
+#####################################################################################
+#4. Download metadata
+
+#Metadata was downloaded for the same donor used previously, restricted to:
+#- assay_title = ATAC-seq
+#- assembly = GRCh38
+#- tissues = stomach and sigmoid_colon
+
+#Command used:
+../bin/download.metadata.sh "https://www.encodeproject.org/metadata/?type=Experiment&replicates.library.biosample.donor.uuid=d370683e-81e7-473f-8475-7716d027849b&status=released&assembly=GRCh38&biosample_ontology.term_name=sigmoid+colon&biosample_ontology.term_name=stomach&assay_title=ATAC-seq"
+
+
+#####################################################################################
+#5. Select the ATAC-seq peak files
+
+#The metadata was filtered to keep only files that matched:
+#- ATAC-seq
+#- bigBed_narrowPeak
+#- pseudoreplicated_peaks
+#- GRCh38
+
+#Command used:
+grep -F "ATAC-seq" metadata.tsv |\
+grep -F "bigBed_narrowPeak" |\
+grep -F "pseudoreplicated_peaks" |\
+grep -F "GRCh38" |\
+awk 'BEGIN{FS=OFS="\t"}{print $1, $11}' |\
+sort -k2,2 -k1,1r |\
+sort -k2,2 -u > analyses/bigBed.peaks.ids.txt
+
+#This produced two selected files:
+#- ENCFF287UHP    sigmoid_colon
+#- ENCFF762IFP    stomach
+
+#####################################################################################
+#6. Download the selected bigBed peak files
+
+#The selected files were downloaded from ENCODE:
+cut -f1 analyses/bigBed.peaks.ids.txt |\
+while read filename; do
+  wget -P data/bigBed.files "https://www.encodeproject.org/files/$filename/@@download/$filename.bigBed"
+done
+
+#####################################################################################
+#7. Verify file integrity with md5sum
+
+#retrieve original MD5 hash from the metadata:
+
+../bin/selectRows.sh <(cut -f1 analyses/bigBed.peaks.ids.txt) metadata.tsv | cut -f1,46 > data/bigBed.files/md5sum.txt
+
+#compute MD5 hash on the downloaded files:
+cat data/bigBed.files/md5sum.txt |\
+while read filename original_md5sum; do
+  md5sum data/bigBed.files/"$filename".bigBed |\
+  awk -v filename="$filename" -v original_md5sum="$original_md5sum" 'BEGIN{FS=" "; OFS="\t"}{print filename, original_md5sum, $1}'
+done > tmp
+mv tmp data/bigBed.files/md5sum.txt
+
+#make sure there are no files for which original and computed MD5 hashes differ:
+awk '$2!=$3' data/bigBed.files/md5sum.txt
+
+#No output was produced, indicating that both downloaded files passed the md5 checksum verification.
+
+#####################################################################################
+#8. Convert bigBed files to BED format
+
+#Convert bigBed files to BED files with the bigBedToBed command:
+cut -f1 analyses/bigBed.peaks.ids.txt |\
+while read filename; do
+  bigBedToBed data/bigBed.files/"$filename".bigBed data/bed.files/"$filename".bed
+done
+
+#####################################################################################
+#9. Prepare annotation files
+
+#The GENCODE v24 annotation file was downloaded:
+wget -P annotation "https://www.encodeproject.org/files/gencode.v24.primary_assembly.annotation/@@download/gencode.v24.primary_assembly.annotation.gtf.gz"
+
+#The file was uncompressed:
+gunzip annotation/gencode.v24.primary_assembly.annotation.gtf.gz
+
+#Exploring the file:
+less annotation/gencode.v24.primary_assembly.annotation.gtf
+
+#A BED file containing protein coding gene bodies was created with:
+awk '$3=="gene"' annotation/gencode.v24.primary_assembly.annotation.gtf |\
+grep -F "protein_coding" |\
+cut -d ";" -f1 |\
+awk 'BEGIN{OFS="\t"}{print $1, $4, $5, $10, 0, $7, $10}' |\
+sed 's/\"//g' |\
+awk 'BEGIN{FS=OFS="\t"}$1!="chrM"{$2=($2-1); print $0}' > annotation/gencode.v24.protein.coding.gene.body.bed
+
+#Download (gencode.v24.protein.coding.non.redundant.TSS.bed) from the provided link:
+#https://public-docs.crg.es/rguigo/Data/bborsari/UVIC/epigenomics_course/gencode.v24.protein.coding.non.redundant.TSS.bed
+
+#####################################################################################
+#10.getting the number of peaks that intersect promoter regions:
+
+
+cut -f1,2 analyses/bigBed.peaks.ids.txt |\
+while read filename tissue; do
+  bedtools intersect -a data/bed.files/"$filename".bed -b annotation/gencode.v24.protein.coding.non.redundant.TSS.bed -u |\
+  wc -l > analyses/peaks.analysis/"$tissue".promoter.peak.count.txt
+done
+
+#Results:
+#sigmoid_colon.promoter.peak.count.    47871
+#stomach.promoter.peak.count.          44749
+
+
+#####################################################################################
+#11. the number of peaks that fall outside gene coordinates (whole gene body, not just the promoter regions)
+
+cut -f1,2 analyses/bigBed.peaks.ids.txt |\
+while read filename tissue; do
+  bedtools intersect -a data/bed.files/"$filename".bed -b annotation/gencode.v24.protein.coding.gene.body.bed -v |\
+  wc -l > analyses/peaks.analysis/"$tissue".outside.gene.body.peak.count.txt
+done
+
+#Results:
+#sigmoid_colon.outside.gene.body.peak.count.  37035
+#stomach.outside.gene.body.peak.count.        34537
+
+
+
+
+

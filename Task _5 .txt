@@ -1,0 +1,252 @@
+#Task 5: Distal regulatory activity
+
+#This task started from the ATAC-seq peaks generated in Task 4 that lie outside gene coordinates in stomach and sigmoid_colon. The goal was to identify candidate distal regulatory elements, restrict the analysis to chromosome #1, assign each regulatory element to its closest gene, and compute the mean and median distances. 
+
+#####################################################################################
+#Task 1. Create a folder regulatory_elements
+
+
+#A new folder called regulatory_elements was created inside epigenomics_uvic to store all results.
+
+#Commands used:
+cd ..
+mkdir regulatory_elements
+cd regulatory_elements
+mkdir data 
+mkdir analyses
+#####################################################################################
+#Task 2. Select distal regulatory elements
+
+
+#Candidate distal regulatory elements were defined as ATAC-seq peaks outside gene coordinates that overlap both H3K27ac and H3K4me1 peaks in the corresponding tissue.
+
+#First, ATAC distal peaks were generated:
+for tissue in stomach sigmoid_colon; do
+  if [ "$tissue" = "stomach" ]; then
+    atac=../ATAC-seq/data/bed.files/ENCFF762IFP.bed
+  else
+    atac=../ATAC-seq/data/bed.files/ENCFF287UHP.bed
+  fi
+
+  bedtools intersect -a "$atac" \
+    -b ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed \
+    -v > data/${tissue}.ATAC.distal.bed
+done
+
+
+cd ../ChIP-seq
+mkdir -p analyses
+mkdir -p data/bigBed.files
+mkdir -p data/bed.files
+
+#Download the chipseq metadata :
+
+../bin/download.metadata.sh "https://www.encodeproject.org/metadata/?type=Experiment&replicates.library.biosample.donor.uuid=d370683e-81e7-473f-8475-7716d027849b&status=released&assembly=GRCh38&biosample_ontology.term_name=sigmoid+colon&biosample_ontology.term_name=stomach&assay_title=Histone+ChIP-seq"
+
+grep -F "H3K27ac" metadata.tsv
+grep -F "H3K4me1" metadata.tsv
+grep -F "bigBed_narrowPeak" |\
+grep -F "pseudoreplicated_peaks" |\
+grep -F "GRCh38" |\
+awk 'BEGIN{FS=OFS="\t"}{print $1, $11, $23}' |\
+sort -k2,2 -k3,3 -k1,1r |\
+sort -k2,2 -k3,3 -u > analyses/bigBed.peaks.ids.txt
+
+
+cut -f1 analyses/bigBed.peaks.ids.txt |\
+while read filename; do
+  wget -P data/bigBed.files "https://www.encodeproject.org/files/$filename/@@download/$filename.bigBed"
+done
+
+cut -f1 analyses/bigBed.peaks.ids.txt |\
+while read filename; do
+  bigBedToBed data/bigBed.files/"$filename".bigBed data/bed.files/"$filename".bed
+done
+
+cd ../regulatory_elements
+
+
+#The required ChIP-seq lookup files were prepared:
+grep -F "H3K27ac" ../ChIP-seq/analyses/bigBed.peaks.ids.txt | \
+awk 'BEGIN{FS=OFS="\t"}{print $1, $2}' > analyses/H3K27ac.ids.txt
+
+grep -F "H3K4me1" ../ChIP-seq/analyses/bigBed.peaks.ids.txt | \
+awk 'BEGIN{FS=OFS="\t"}{print $1, $2}' > analyses/H3K4me1.ids.txt
+
+#Candidate distal regulatory elements were selected:
+while read chip27 tissue; do
+  chip4=$(awk -v t="$tissue" '$2==t{print $1}' analyses/H3K4me1.ids.txt)
+
+  bedtools intersect \
+    -a data/${tissue}.ATAC.distal.bed \
+    -b ../ChIP-seq/data/bed.files/${chip27}.bed -u | \
+  bedtools intersect \
+    -a stdin \
+    -b ../ChIP-seq/data/bed.files/${chip4}.bed -u \
+    > data/${tissue}.candidate.regulatory.elements.bed
+done < analyses/H3K27ac.ids.txt
+
+#Obtain the counts using command:
+
+for tissue in stomach sigmoid_colon; do
+  echo -e "$tissue\t$(wc -l < data/${tissue}.candidate.regulatory.elements.bed)"
+done
+
+#Counts:
+#- stomach: 8022
+#- sigmoid_colon: 14215
+
+#####################################################################################
+#Task 3. Focus on chromosome 1 and create regulatory.elements.starts.tsv
+
+
+#Only chromosome 1 regulatory elements were kept. For each region, the file stores:
+#1. the regulatory region name (original ATAC-seq peak name)
+#2. the start coordinate of the region
+
+#Commands used:
+awk 'BEGIN{FS=OFS="\t"}$1=="chr1"{print $4, $2}' data/stomach.candidate.regulatory.elements.bed > analyses/stomach.regulatory.elements.starts.tsv
+
+awk 'BEGIN{FS=OFS="\t"}$1=="chr1"{print $4, $2}' data/sigmoid_colon.candidate.regulatory.elements.bed > analyses/sigmoid_colon.regulatory.elements.starts.tsv
+
+for tissue in stomach sigmoid_colon; do
+  echo -e "$tissue\t$(wc -l < analyses/${tissue}.regulatory.elements.starts.tsv)"
+done
+
+#Counts on chromosome 1:
+#- stomach: 987
+#- sigmoid_colon: 1521
+
+#####################################################################################
+#Task 4. Create gene.starts.tsv
+
+
+#A tab-separated file called gene.starts.tsv was generated from the chromosome 1 protein-coding gene-body BED file. The first column stores the gene name and the second column stores the gene start coordinate. For genes on the #plus strand, the start coordinate is the BED start. For genes on the minus strand, the gene start is the BED end, as required by the task.
+
+#Command used:
+awk 'BEGIN{FS=OFS="\t"}$1=="chr1"{if($6=="+"){start=$2}else{start=$3}; print $4, start}' \
+  ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed > gene.starts.tsv
+
+head gene.starts.tsv
+
+#Example lines from the file:
+#ENSG00000186092.4    69090
+#ENSG00000279928.1    182392
+#ENSG00000279457.3    200322
+#ENSG00000278566.1    451678
+#ENSG00000273547.1    686654
+#ENSG00000187634.10   924879
+#ENSG00000188976.10   959309
+#ENSG00000187961.13   960586
+#ENSG00000187583.10   966496
+#ENSG00000187642.9    982093
+
+#####################################################################################
+#Task 5. Complete and test get.distance.py
+
+
+#The python script get.distance.py was created in ../bin and completed so that for a given regulatory element start coordinate it returns:
+#1. the closest gene
+#2. the start coordinate of that gene
+#3. the distance between the regulatory element and the gene start
+
+#Script:
+cat > ../bin/get.distance.py <<'PY'
+#!/usr/bin/env python
+
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input", required=True, help="Tab-separated file with gene name in col1 and gene start in col2")
+parser.add_argument("--start", required=True, type=int, help="Regulatory element start coordinate")
+args = parser.parse_args()
+
+best_gene = None
+best_start = None
+best_dist = None
+
+with open(args.input) as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        gene, gene_start = line.split("\t")
+        gene_start = int(gene_start)
+        dist = abs(gene_start - args.start)
+
+        if best_dist is None or dist < best_dist:
+            best_gene = gene
+            best_start = gene_start
+            best_dist = dist
+
+print("%s\t%s\t%s" % (best_gene, best_start, best_dist))
+PY
+
+chmod +x ../bin/get.distance.py
+
+#Test command:
+python ../bin/get.distance.py --input gene.starts.tsv --start 980000
+
+#Test result:
+#ENSG00000187642.9    982093    2093
+
+#####################################################################################
+#Task 6. Retrieve the closest gene and distance for each regulatory element
+
+
+#The python script was run for each regulatory element stored in the chromosome 1 regulatory-element start files.
+
+#For stomach:
+cat analyses/stomach.regulatory.elements.starts.tsv | while read element start; do
+  python ../bin/get.distance.py --input gene.starts.tsv --start "$start" | \
+  awk -v e="$element" 'BEGIN{FS=OFS="\t"}{print e, $1, $2, $3}'
+done > analyses/stomach.regulatoryElements.genes.distances.tsv
+
+#For sigmoid_colon:
+cat analyses/sigmoid_colon.regulatory.elements.starts.tsv | while read element start; do
+  python ../bin/get.distance.py --input gene.starts.tsv --start "$start" | \
+  awk -v e="$element" 'BEGIN{FS=OFS="\t"}{print e, $1, $2, $3}'
+done > analyses/sigmoid_colon.regulatoryElements.genes.distances.tsv
+
+
+
+#####################################################################################
+#Task 7. Compute mean and median distances in R
+
+
+#The mean and median distances were computed in R from the files created in Task 6.
+
+#For stomach:
+Rscript -e 'x<-read.table("analyses/stomach.regulatoryElements.genes.distances.tsv",sep="\t",stringsAsFactors=FALSE); cat("stomach_mean\t",mean(x$V4),"\n",sep=""); cat("stomach_median\t",median(x$V4),"\n",sep="")'
+
+#Result:
+#stomach_mean    45227.05
+#stomach_median  27735
+
+#For sigmoid_colon:
+Rscript -e 'x<-read.table("analyses/sigmoid_colon.regulatoryElements.genes.distances.tsv",sep="\t",stringsAsFactors=FALSE); cat("sigmoid_colon_mean\t",mean(x$V4),"\n",sep=""); cat("sigmoid_colon_median\t",median(x$V4),"\n",sep="")'
+
+#Result:
+#sigmoid_colon_mean    73806.19
+#sigmoid_colon_median  35802
+
+#####################################################################################
+#Final answers
+
+
+#Task 2 answer:
+#- stomach: 8022 candidate distal regulatory elements
+#- sigmoid_colon: 14215 candidate distal regulatory elements
+
+#Task 3 answer:
+#- stomach: 987 chromosome 1 regulatory elements
+#- sigmoid_colon: 1521 chromosome 1 regulatory elements
+
+#Task 5 answer:
+#- test command output: ENSG00000187642.9    982093    2093
+
+#Task 7 answer:
+#- stomach mean distance: 45227.05
+#- stomach median distance: 27735
+#- sigmoid_colon mean distance: 73806.19
+#- sigmoid_colon median distance: 35802
